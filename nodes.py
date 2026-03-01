@@ -33,6 +33,19 @@ def update_folder_names_and_paths(key, targets=[]):
 update_folder_names_and_paths("unet_gguf", ["diffusion_models", "unet"])
 update_folder_names_and_paths("clip_gguf", ["text_encoders", "clip"])
 
+def _clone_as_gguf_model_patcher(self, *args, model_override=None, **kwargs):
+    if model_override is None:
+        model_override = self.get_clone_model_override()
+    mmap_released = model_override[2] if len(model_override) > 2 else False
+    src_cls = self.__class__
+    self.__class__ = GGUFModelPatcher
+    n = comfy.model_patcher.ModelPatcher.clone(self, *args, model_override=model_override, **kwargs)
+    n.__class__ = GGUFModelPatcher
+    self.__class__ = src_cls
+    n.patch_on_device = getattr(self, "patch_on_device", False)
+    n.mmap_released = mmap_released
+    return n
+
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     patch_on_device = False
 
@@ -90,6 +103,9 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     mmap_released = False
     named_modules_to_munmap = {}
 
+    def get_clone_model_override(self):
+        return (*super().get_clone_model_override(), self.mmap_released)
+
     def load(self, *args, force_patch_weights=False, **kwargs):
         if not self.mmap_released:
             self.named_modules_to_munmap = dict(self.model.named_modules())
@@ -121,22 +137,19 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             self.named_modules_to_munmap = {}
 
     def clone(self, *args, **kwargs):
-        src_cls = self.__class__
-        self.__class__ = GGUFModelPatcher
-        n = super().clone(*args, **kwargs)
-        n.__class__ = GGUFModelPatcher
-        self.__class__ = src_cls
-        # GGUF specific clone values below
-        n.patch_on_device = getattr(self, "patch_on_device", False)
-        n.mmap_released = getattr(self, "mmap_released", False)
-        if src_cls != GGUFModelPatcher:
+        n = _clone_as_gguf_model_patcher(self, *args, **kwargs)
+        if self.__class__ != GGUFModelPatcher:
             n.size = 0 # force recalc
         return n
 
 
 def _clone_patcher_to_gguf(model_patcher):
     if model_patcher.is_dynamic():
-        return GGUFModelPatcherDynamic.clone(model_patcher)
+        src_cls = model_patcher.__class__
+        model_patcher.__class__ = GGUFModelPatcherDynamic
+        n = model_patcher.clone()
+        model_patcher.__class__ = src_cls
+        return n
     else:
         return GGUFModelPatcher.clone(model_patcher)
 
