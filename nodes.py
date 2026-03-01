@@ -11,6 +11,7 @@ import comfy.float
 import comfy.utils
 import comfy.model_patcher
 import comfy.model_management
+import comfy.memory_management
 import folder_paths
 
 from .ops import GGMLOps, move_patch_to_device
@@ -132,6 +133,34 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             n.size = 0 # force recalc
         return n
 
+
+def _clone_patcher_to_gguf(model_patcher):
+    if model_patcher.is_dynamic():
+        return GGUFModelPatcherDynamic.clone(model_patcher)
+    else:
+        return GGUFModelPatcher.clone(model_patcher)
+
+def _load_gguf_unet(unet_path, ops, disable_dynamic=False):
+    dynamic = not disable_dynamic and comfy.memory_management.aimdo_enabled
+    sd, extra = gguf_sd_loader(unet_path, dynamic=dynamic)
+
+    kwargs = {}
+    valid_params = inspect.signature(comfy.sd.load_diffusion_model_state_dict).parameters
+    if "metadata" in valid_params:
+        kwargs["metadata"] = extra.get("metadata", {})
+
+    model = comfy.sd.load_diffusion_model_state_dict(
+        sd, model_options={} if dynamic else { "custom_operations" : ops }, disable_dynamic=disable_dynamic, **kwargs,
+    )
+    if model is None:
+        logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
+        raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
+    model = _clone_patcher_to_gguf(model)
+
+    model.cached_patcher_init = (_load_gguf_unet, (unet_path, ops))
+
+    return model
+
 class UnetLoaderGGUF:
     @classmethod
     def INPUT_TYPES(s):
@@ -164,22 +193,8 @@ class UnetLoaderGGUF:
         else:
             ops.Linear.patch_dtype = getattr(torch, patch_dtype)
 
-        # init model
         unet_path = folder_paths.get_full_path("unet", unet_name)
-        sd, extra = gguf_sd_loader(unet_path)
-
-        kwargs = {}
-        valid_params = inspect.signature(comfy.sd.load_diffusion_model_state_dict).parameters
-        if "metadata" in valid_params:
-            kwargs["metadata"] = extra.get("metadata", {})
-
-        model = comfy.sd.load_diffusion_model_state_dict(
-            sd, model_options={"custom_operations": ops}, **kwargs,
-        )
-        if model is None:
-            logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
-            raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
-        model = GGUFModelPatcher.clone(model)
+        model = _load_gguf_unet(unet_path, ops)
         model.patch_on_device = patch_on_device
         return (model,)
 
