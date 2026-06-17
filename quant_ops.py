@@ -28,6 +28,17 @@ except ImportError:
 
 from .dequant import dequantize_functions, TORCH_COMPATIBLE_QTYPES, is_quantized
 
+HAS_COMPILE = hasattr(torch, 'compile')
+def conditional_compile(*args, **kwargs):
+    def decorator(func):
+        if HAS_COMPILE:
+            try:
+                return torch.compile(func, *args, **kwargs)
+            except Exception:
+                return func
+        return func
+    return decorator
+
 if _CK_AVAILABLE:
     @dataclass(frozen=True)
     class GGMLLayoutParams(BaseLayoutParams):
@@ -39,6 +50,14 @@ if _CK_AVAILABLE:
         @classmethod
         def quantize(cls, tensor, **kwargs):
             raise NotImplementedError("Quantization to GGML format is not supported")
+
+
+        @staticmethod
+        @conditional_compile(fullgraph=True)
+        def _compiled_core_dequantize(qdata_raw, qtype, block_size, type_size, dequant_func):
+            n_blocks = qdata_raw.numel() // type_size
+            blocks = qdata_raw.reshape((n_blocks, type_size))
+            return dequant_func(blocks, block_size, type_size, None)
 
         @classmethod
         def dequantize(cls, qdata, params):
@@ -56,9 +75,11 @@ if _CK_AVAILABLE:
 
             block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
             raw = qdata.reshape(-1).view(torch.uint8)
-            n_blocks = raw.numel() // type_size
-            blocks = raw.reshape((n_blocks, type_size))
-            blocks = dequantize_functions[qtype](blocks, block_size, type_size, None)
+
+            blocks = cls._compiled_core_dequantize(
+                raw, qtype, block_size, type_size, dequantize_functions[qtype]
+            )
+
             return blocks.reshape(oshape).to(params.orig_dtype)
 
         @classmethod
