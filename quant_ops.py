@@ -29,15 +29,7 @@ except ImportError:
 from .dequant import dequantize_functions, TORCH_COMPATIBLE_QTYPES, is_quantized
 
 HAS_COMPILE = hasattr(torch, 'compile')
-def conditional_compile(*args, **kwargs):
-    def decorator(func):
-        if HAS_COMPILE:
-            try:
-                return torch.compile(func, *args, **kwargs)
-            except Exception:
-                return func
-        return func
-    return decorator
+COMPILED_DEQUANT_FUNCTIONS = {}
 
 if _CK_AVAILABLE:
     @dataclass(frozen=True)
@@ -50,14 +42,6 @@ if _CK_AVAILABLE:
         @classmethod
         def quantize(cls, tensor, **kwargs):
             raise NotImplementedError("Quantization to GGML format is not supported")
-
-
-        @staticmethod
-        @conditional_compile(fullgraph=True)
-        def _compiled_core_dequantize(qdata_raw, qtype, block_size, type_size, dequant_func):
-            n_blocks = qdata_raw.numel() // type_size
-            blocks = qdata_raw.reshape((n_blocks, type_size))
-            return dequant_func(blocks, block_size, type_size, None)
 
         @classmethod
         def dequantize(cls, qdata, params):
@@ -75,11 +59,11 @@ if _CK_AVAILABLE:
 
             block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
             raw = qdata.reshape(-1).view(torch.uint8)
+            n_blocks = raw.numel() // type_size
+            blocks = raw.reshape((n_blocks, type_size))
 
-            blocks = cls._compiled_core_dequantize(
-                raw, qtype, block_size, type_size, dequantize_functions[qtype]
-            )
-
+            fn = get_compiled(qtype, dequantize_functions[qtype])
+            blocks = fn(blocks, block_size, type_size, None)
             return blocks.reshape(oshape).to(params.orig_dtype)
 
         @classmethod
@@ -92,6 +76,20 @@ if _CK_AVAILABLE:
 
     register_layout_class("GGMLLayout", GGMLLayout)
 
+def get_compiled(qtype, raw_func):
+    if qtype in COMPILED_DEQUANT_FUNCTIONS:
+        return COMPILED_DEQUANT_FUNCTIONS[qtype]
+
+    if HAS_COMPILE:
+        try:
+            compiled = torch.compile(raw_func, fullgraph=True)
+        except Exception:
+            compiled = raw_func
+    else:
+        compiled = raw_func
+
+    COMPILED_DEQUANT_FUNCTIONS[qtype] = compiled
+    return compiled
 
 def make_quantized(qdata, tensor_type, tensor_shape, orig_dtype=torch.float16):
     """Construct a GGML QuantizedTensor from raw packed data."""
