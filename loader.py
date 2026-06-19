@@ -14,6 +14,36 @@ IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltx
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
+def device_supports_bf16():
+    """
+    Return True if the active torch device can run BF16 efficiently. Some
+    consumer Ampere GPUs report BF16 support through PyTorch/Comfy but route
+    model execution through FP32 manual casts, which is much slower. Keep this
+    stricter than Comfy's generic helper for GGUF tensor loading.
+    """
+    try:
+        import comfy.model_management
+        device = torch.device(comfy.model_management.get_torch_device())
+        if device.type != "cuda":
+            return comfy.model_management.should_use_bf16(device)
+
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        major, minor = torch.cuda.get_device_capability(index)
+        name = torch.cuda.get_device_name(index).lower()
+
+        # Native fast BF16 is available on GA100/A100-class Ampere, Ada, Hopper,
+        # and newer architectures. GA10x Ampere cards such as RTX 30xx expose
+        # BF16 in some software paths but are slow for this workload.
+        if major >= 9:
+            return True
+        if (major, minor) >= (8, 9):
+            return True
+        if (major, minor) == (8, 0) and ("a100" in name or "a800" in name):
+            return True
+        return False
+    except Exception:
+        return False
+
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
     field = reader.get_field(field_key)
@@ -116,6 +146,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     # main loading loop
     state_dict = {}
     qtype_dict = {}
+    bf16_storage_dtype = torch.bfloat16 if device_supports_bf16() else torch.float16
     for sd_key, tensor in tensors:
         tensor_name = tensor.name
         # torch_tensor = torch.from_numpy(tensor.data) # mmap
@@ -135,19 +166,16 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
                         shape = shape[:-1]
 
         # add to state dict
-        if dynamic:
-            if tensor.tensor_type not in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
-                state_dict[sd_key] = make_quantized(torch_tensor, tensor.tensor_type, shape)
-            else:
-                state_dict[sd_key] = torch_tensor.view(*shape)
+        if tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
+            # dtype = torch.float32 if torch_tensor.numel() // 2 <= 10000 else bf16_storage_dtype
+            torch_tensor = torch_tensor.reshape(-1)
+            state_dict[sd_key] = torch_tensor.view(torch.bfloat16).reshape(*shape).to(bf16_storage_dtype)
+        elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+            state_dict[sd_key] = torch_tensor.view(*shape)
+        elif dynamic:
+            state_dict[sd_key] = make_quantized(torch_tensor, tensor.tensor_type, shape)
         else:
-            if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
-                torch_tensor = torch_tensor.view(*shape)
             state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
-
-        # 1D tensors shouldn't be quantized, this is a fix for BF16
-        if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
-            state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
 
         # keep track of loaded tensor types
         tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
