@@ -254,6 +254,30 @@ CLIP_VISION_SD_MAP = {
     "ln2.": "norm2.",
 }
 
+CLIP_VISION_QWEN3_MAP = {
+    "v.blk": "model.visual.blocks",  
+    "attn_out": "attn.proj",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "attn_qkv": "attn.qkv",
+    "ffn_up": "mlp.linear_fc1",
+    "ffn_down": "mlp.linear_fc2",
+    "mm.0": "model.visual.merger.linear_fc1",
+    "mm.2": "model.visual.merger.linear_fc2",
+    "v.post_ln": "model.visual.merger.norm",
+    "v.patch_embd": "model.visual.patch_embed.proj",
+    "v.position_embd.weight": "visual.pos_embed.weight",
+    "v.deepstack.8.norm": "model.visual.deepstack_merger_list.0.norm",
+    "v.deepstack.8.fc1": "model.visual.deepstack_merger_list.0.linear_fc1",
+    "v.deepstack.8.fc2": "model.visual.deepstack_merger_list.0.linear_fc2",
+    "v.deepstack.16.norm": "model.visual.deepstack_merger_list.1.norm",
+    "v.deepstack.16.fc1": "model.visual.deepstack_merger_list.1.linear_fc1",
+    "v.deepstack.16.fc2": "model.visual.deepstack_merger_list.1.linear_fc2",
+    "v.deepstack.24.norm": "model.visual.deepstack_merger_list.2.norm",
+    "v.deepstack.24.fc1": "model.visual.deepstack_merger_list.2.linear_fc1",
+    "v.deepstack.24.fc2": "model.visual.deepstack_merger_list.2.linear_fc2",
+}
+
 def sd_map_replace(raw_sd, key_map):
     sd = {}
     for k,v in raw_sd.items():
@@ -340,7 +364,15 @@ def gguf_mmproj_loader(path):
         w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"), dtype=torch.float32)
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
 
-    # run main replacement
+
+    # qwen3vl
+    if "v.deepstack.8.norm.weight" in vsd:
+        for k in list(vsd.keys()):
+            vsd[k] = dequantize_tensor(vsd[k], dtype=torch.float32)         
+        return sd_map_replace(vsd, CLIP_VISION_QWEN3_MAP)
+
+
+    # qwen2vl
     vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
 
     # handle split Q/K/V
@@ -533,12 +565,9 @@ def gguf_clip_loader(path, dynamic=False):
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl":
+        if arch == "qwen2vl" or arch == "qwen3vl":
             vsd = gguf_mmproj_loader(path)
             sd.update(vsd)
-        if arch == "qwen3vl":
-            sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(4608)
-            sd["model.visual.merger.linear_fc2.weight"] = torch.zeros(4096)
     else:
         pass
     return sd
