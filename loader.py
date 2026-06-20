@@ -536,6 +536,9 @@ def gguf_clip_loader(path, dynamic=False):
         if arch == "qwen2vl":
             vsd = gguf_mmproj_loader(path)
             sd.update(vsd)
+        if arch == "qwen3vl":
+            sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(4608)
+            sd["model.visual.merger.linear_fc2.weight"] = torch.zeros(4096)
     else:
         pass
     return sd
