@@ -11,7 +11,7 @@ from .dequant import is_quantized, dequantize_tensor
 from .quant_ops import make_quantized
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image", "ideogram4"}
-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
+TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
 def get_orig_shape(reader, tensor_name):
@@ -139,7 +139,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
             state_dict[sd_key] = torch_tensor.view(torch.bfloat16).reshape(*shape)
         elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             state_dict[sd_key] = torch_tensor.view(*shape)
-        elif dynamic:
+        elif dynamic and sd_key != "per_layer_token_embd.weight":
             state_dict[sd_key] = make_quantized(torch_tensor, tensor.tensor_type, shape)
         else:
             state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
@@ -208,6 +208,19 @@ GEMMA3_SD_MAP.update({
     "post_attention_norm": "post_attention_layernorm",
 })
 
+GEMMA4_SD_MAP = {
+    "per_layer_token_embd": "model.embed_tokens_per_layer",
+    "per_layer_model_proj": "model.per_layer_model_projection",
+    "proj.weight": "per_layer_projection.weight",
+}
+GEMMA4_SD_MAP.update(GEMMA3_SD_MAP)
+GEMMA4_SD_MAP.update({
+    "layer_output_scale.weight": "layer_scalar",
+    "inp_gate.weight": "per_layer_input_gate.weight",
+    "post_norm.weight": "post_per_layer_input_norm.weight",
+    "per_layer_proj_norm": "model.per_layer_projection_norm",
+})
+
 CLIP_VISION_SD_MAP = {
     "mm.": "visual.merger.mlp.",
     "v.post_ln.": "visual.merger.ln_q.",
@@ -243,6 +256,30 @@ CLIP_VISION_QWEN3_MAP = {
     "v.deepstack.24.norm": "model.visual.deepstack_merger_list.2.norm",
     "v.deepstack.24.fc1": "model.visual.deepstack_merger_list.2.linear_fc1",
     "v.deepstack.24.fc2": "model.visual.deepstack_merger_list.2.linear_fc2",
+}
+
+CLIP_VISION_GEMMA4_MAP = {
+    "v.position_embd.weight": "vision_model.patch_embedder.position_embedding_table",
+    "mm.input_projection": "multi_modal_projector.embedding_projection",
+    "mm.a.input_projection": "audio_projector.embedding_projection",
+    "attn_post_norm": "post_attention_layernorm",
+    "ffn_post_norm": "post_feedforward_layernorm",
+    "attn_k_norm": "self_attn.k_norm",
+    "attn_q_norm": "self_attn.q_norm",
+    "ln1.weight": "input_layernorm.weight",
+    "ln2.weight": "pre_feedforward_layernorm.weight",
+    "attn_out.": "self_attn.o_proj.",
+    "attn_k.": "self_attn.k_proj.",
+    "attn_q.": "self_attn.q_proj.",
+    "attn_v.": "self_attn.v_proj.",
+    "ffn_down.": "mlp.down_proj.",
+    "ffn_gate.": "mlp.gate_proj.",
+    "ffn_up.": "mlp.up_proj.",
+    "r0.weight": "r0.conv.weight",
+    "r1.weight": "r1.conv.weight",
+    "v.blk": "vision_model.encoder.layers",
+    "_proj.weight": "_proj.linear.weight",
+    "v.patch_embd.": "vision_model.patch_embedder.input_proj.",
 }
 
 def sd_map_replace(raw_sd, key_map):
@@ -325,17 +362,20 @@ def gguf_mmproj_loader(path, dynamic=False):
     target = os.path.join(root, target[0])
     vsd, _ = gguf_sd_loader(target, is_text_model=True, dynamic=dynamic)
 
+    # gemma4
+    if "mm.a.input_projection.weight" in vsd:
+        vsd["v.patch_embd.weight"] = vsd["v.patch_embd.weight"].permute(0, 2, 3, 1).flatten(start_dim=1)  
+        return sd_map_replace(vsd, CLIP_VISION_GEMMA4_MAP)
+
     # concat 4D to 5D
     if "v.patch_embd.weight.1" in vsd:
         w1 = dequantize_tensor(vsd.pop("v.patch_embd.weight"), dtype=torch.float32)
         w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"), dtype=torch.float32)
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
 
-
     # qwen3vl
     if "v.deepstack.8.norm.weight" in vsd:
         return sd_map_replace(vsd, CLIP_VISION_QWEN3_MAP)
-
 
     # qwen2vl
     vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
@@ -499,6 +539,35 @@ def gguf_gemma3_tokenizer_loader(path):
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
 
+def gguf_json_tokenizer_loader(path):
+    tenc_fname = os.path.basename(path)
+    tenc = os.path.splitext(tenc_fname)[0].lower()
+    tenc = strip_quant_suffix(tenc)
+
+    target = []
+    root = os.path.dirname(path)
+    for fname in os.listdir(root):
+        name, ext = os.path.splitext(fname)
+        if ext.lower() != ".json":
+            continue
+        if "tokenizer" not in name.lower():
+            continue
+        if tenc in name.lower():
+            target.append(fname)
+
+    if len(target) == 0:
+        logging.error(f"Error: Can't find tokenizer file for '{tenc_fname}' (matching:'{tenc}')!")
+        return torch.tensor([], dtype=torch.uint8)
+    if len(target) > 1:
+        logging.error(f"Ambiguous tokenizer for text encoder '{tenc_fname}', will use first match.")
+
+    logging.info(f"Using tokenizer '{target[0]}' for text encoder '{tenc_fname}'.")
+    target = os.path.join(root, target[0])
+    
+    with open(target, "rb") as f:
+        tokenizer_bytes = f.read()  
+    return torch.tensor(list(tokenizer_bytes), dtype=torch.uint8)
+
 def gguf_clip_loader(path, dynamic=False):
     sd, extra = gguf_sd_loader(path, is_text_model=True, dynamic=dynamic)
     arch = extra.get("arch_str", None)
@@ -511,7 +580,7 @@ def gguf_clip_loader(path, dynamic=False):
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
-    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}:
+    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}:
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
@@ -520,17 +589,27 @@ def gguf_clip_loader(path, dynamic=False):
                 sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape)
             elif arch == "gemma3":
                 sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path)
-            # See note above for T5.
-            logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
-            sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
+            if arch == "gemma4":
+                sd["tokenizer_json"] = gguf_json_tokenizer_loader(path)
+            else:
+                # See note above for T5.
+                logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
+                sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         if arch == "gemma3":
             sd = sd_map_replace(sd, GEMMA3_SD_MAP)
             sd = gemma3_norm_corrections(sd)
+        elif arch == "gemma4":
+            sd = sd_map_replace(sd, GEMMA4_SD_MAP)
+
+            # temporary workaround
+            for k in list(sd.keys()):
+                if k != "tokenizer_json":
+                    sd[k] = dequantize_tensor(sd[k], dtype=torch.bfloat16)
         else:
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl" or arch == "qwen3vl":
+        if arch == "qwen2vl" or arch == "qwen3vl" or arch == "gemma4":
             vsd = gguf_mmproj_loader(path, dynamic=dynamic)
             if not vsd and arch == "qwen3vl":
                 sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(4608)
