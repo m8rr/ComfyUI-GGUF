@@ -139,7 +139,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
             state_dict[sd_key] = torch_tensor.view(torch.bfloat16).reshape(*shape)
         elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             state_dict[sd_key] = torch_tensor.view(*shape)
-        elif dynamic and sd_key != "per_layer_token_embd.weight":
+        elif dynamic:
             state_dict[sd_key] = make_quantized(torch_tensor, tensor.tensor_type, shape)
         else:
             state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
@@ -602,9 +602,9 @@ def gguf_clip_loader(path, dynamic=False):
             sd = sd_map_replace(sd, GEMMA4_SD_MAP)
 
             # temporary workaround
-            for k in list(sd.keys()):
-                if k != "tokenizer_json":
-                    sd[k] = dequantize_tensor(sd[k], dtype=torch.bfloat16)
+            sd["model.embed_tokens.weight"] = dequantize_tensor(sd["model.embed_tokens.weight"], dtype=torch.bfloat16)
+            sd["model.embed_tokens_per_layer.weight"] = dequantize_tensor(sd["model.embed_tokens_per_layer.weight"], dtype=torch.bfloat16).as_subclass(torch.Tensor)
+            sd["model.norm.weight"] = dequantize_tensor(sd["model.norm.weight"], dtype=torch.bfloat16)
         else:
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
