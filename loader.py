@@ -14,36 +14,6 @@ IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltx
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
-def device_supports_bf16():
-    """
-    Return True if the active torch device can run BF16 efficiently. Some
-    consumer Ampere GPUs report BF16 support through PyTorch/Comfy but route
-    model execution through FP32 manual casts, which is much slower. Keep this
-    stricter than Comfy's generic helper for GGUF tensor loading.
-    """
-    try:
-        import comfy.model_management
-        device = torch.device(comfy.model_management.get_torch_device())
-        if device.type != "cuda":
-            return comfy.model_management.should_use_bf16(device)
-
-        index = device.index if device.index is not None else torch.cuda.current_device()
-        major, minor = torch.cuda.get_device_capability(index)
-        name = torch.cuda.get_device_name(index).lower()
-
-        # Native fast BF16 is available on GA100/A100-class Ampere, Ada, Hopper,
-        # and newer architectures. GA10x Ampere cards such as RTX 30xx expose
-        # BF16 in some software paths but are slow for this workload.
-        if major >= 9:
-            return True
-        if (major, minor) >= (8, 9):
-            return True
-        if (major, minor) == (8, 0) and ("a100" in name or "a800" in name):
-            return True
-        return False
-    except Exception:
-        return False
-
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
     field = reader.get_field(field_key)
@@ -146,7 +116,6 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     # main loading loop
     state_dict = {}
     qtype_dict = {}
-    bf16_storage_dtype = torch.bfloat16 if device_supports_bf16() else torch.float16
     for sd_key, tensor in tensors:
         tensor_name = tensor.name
         # torch_tensor = torch.from_numpy(tensor.data) # mmap
@@ -167,9 +136,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
 
         # add to state dict
         if tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
-            # dtype = torch.float32 if torch_tensor.numel() // 2 <= 10000 else bf16_storage_dtype
-            torch_tensor = torch_tensor.reshape(-1)
-            state_dict[sd_key] = torch_tensor.view(torch.bfloat16).reshape(*shape).to(bf16_storage_dtype)
+            state_dict[sd_key] = torch_tensor.view(torch.bfloat16).reshape(*shape)
         elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             state_dict[sd_key] = torch_tensor.view(*shape)
         elif dynamic:
@@ -327,7 +294,7 @@ def strip_quant_suffix(name):
         name = name[:match.start()]
     return name
 
-def gguf_mmproj_loader(path):
+def gguf_mmproj_loader(path, dynamic=False):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
     logging.info("Attenpting to find mmproj file for text encoder...")
 
@@ -356,7 +323,7 @@ def gguf_mmproj_loader(path):
 
     logging.info(f"Using mmproj '{target[0]}' for text encoder '{tenc_fname}'.")
     target = os.path.join(root, target[0])
-    vsd, _ = gguf_sd_loader(target, is_text_model=True)
+    vsd, _ = gguf_sd_loader(target, is_text_model=True, dynamic=dynamic)
 
     # concat 4D to 5D
     if "v.patch_embd.weight.1" in vsd:
@@ -367,8 +334,6 @@ def gguf_mmproj_loader(path):
 
     # qwen3vl
     if "v.deepstack.8.norm.weight" in vsd:
-        for k in list(vsd.keys()):
-            vsd[k] = dequantize_tensor(vsd[k], dtype=torch.float32)         
         return sd_map_replace(vsd, CLIP_VISION_QWEN3_MAP)
 
 
@@ -566,7 +531,7 @@ def gguf_clip_loader(path, dynamic=False):
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
         if arch == "qwen2vl" or arch == "qwen3vl":
-            vsd = gguf_mmproj_loader(path)
+            vsd = gguf_mmproj_loader(path, dynamic=dynamic)
             if not vsd and arch == "qwen3vl":
                 sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(4608)
                 sd["model.visual.merger.linear_fc2.weight"] = torch.zeros(4096)
