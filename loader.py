@@ -5,6 +5,7 @@ import torch
 import gguf
 import re
 import os
+import json
 
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
@@ -539,6 +540,88 @@ def gguf_gemma3_tokenizer_loader(path):
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
 
+def gguf_gemma4_tokenizer_loader(path):
+    # convert gguf tokenizer to spiece
+    logging.info("Attempting to recreate tokenizer from GGUF file metadata...")
+
+    reader = gguf.GGUFReader(path)
+    tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
+    merges = get_list_field(reader, "tokenizer.ggml.merges", str)
+    del reader
+
+    if not tokens or not merges:
+        raise ValueError("Missing tokenizer metadata")
+
+    vocab = {token: idx for idx, token in enumerate(tokens)}
+    target_special_ids = [
+        0, 1, 2, 3, 4, 46, 47, 48, 49, 50, 51, 52, 98, 100, 101, 105, 106, 255999, 256000, 258880, 258881, 258882, 258883, 258884
+    ]
+    
+    added_tokens = []
+    for sp_id in target_special_ids:
+        if sp_id < len(tokens):
+            added_tokens.append({
+                "id": sp_id,
+                "content": tokens[sp_id],
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+                "normalized": False,
+                "special": True
+            })
+
+    tokenizer_dict = {
+        "version": "1.0",
+        "truncation": None,
+        "padding": None,
+        "added_tokens": added_tokens,
+        "normalizer": {
+            "type": "Replace",
+            "pattern": {"String": " "},
+            "content": "\u2581"
+        },
+        "pre_tokenizer": {
+            "type": "Split",
+            "pattern": {"String": " "},
+            "behavior": "MergedWithPrevious",
+            "invert": False
+        },
+        "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [{"Sequence": {"id": "A", "type_id": 0}}],
+            "pair": [
+                {"Sequence": {"id": "A", "type_id": 0}},
+                {"Sequence": {"id": "B", "type_id": 1}}
+            ],
+            "special_tokens": {}
+        },
+        "decoder": {
+            "type": "Sequence",
+            "decoders": [
+                {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+                {"type": "ByteFallback"},
+                {"type": "Fuse"}
+            ]
+        },
+        "model": {
+            "type": "BPE",
+            "dropout": None,
+            "unk_token": "<unk>",
+            "continuing_subword_prefix": None,
+            "end_of_word_suffix": None,
+            "fuse_unk": True,
+            "byte_fallback": True,
+            "ignore_merges": False,
+            "vocab": vocab,
+            "merges": merges
+        }
+    }
+    
+    json_string = json.dumps(tokenizer_dict, ensure_ascii=False)
+    
+    logging.info(f"Created tokenizer with vocab size of {len(vocab)}")
+    return torch.frombuffer(bytearray(json_string.encode('utf-8')), dtype=torch.uint8)
+
 def gguf_json_tokenizer_loader(path):
     tenc_fname = os.path.basename(path)
     tenc = os.path.splitext(tenc_fname)[0].lower()
@@ -556,17 +639,17 @@ def gguf_json_tokenizer_loader(path):
             target.append(fname)
 
     if len(target) == 0:
-        logging.error(f"Error: Can't find tokenizer file for '{tenc_fname}' (matching:'{tenc}')!")
-        return torch.tensor([], dtype=torch.uint8)
+        logging.info(f"Can't find tokenizer file for '{tenc_fname}' (matching:'{tenc}')!")
+        return None
     if len(target) > 1:
-        logging.error(f"Ambiguous tokenizer for text encoder '{tenc_fname}', will use first match.")
+        logging.info(f"Ambiguous tokenizer for text encoder '{tenc_fname}', will use first match.")
 
     logging.info(f"Using tokenizer '{target[0]}' for text encoder '{tenc_fname}'.")
     target = os.path.join(root, target[0])
     
     with open(target, "rb") as f:
         tokenizer_bytes = f.read()  
-    return torch.tensor(list(tokenizer_bytes), dtype=torch.uint8)
+    return torch.frombuffer(bytearray(tokenizer_bytes), dtype=torch.uint8)
 
 def gguf_clip_loader(path, dynamic=False):
     sd, extra = gguf_sd_loader(path, is_text_model=True, dynamic=dynamic)
@@ -591,6 +674,8 @@ def gguf_clip_loader(path, dynamic=False):
                 sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path)
             if arch == "gemma4":
                 sd["tokenizer_json"] = gguf_json_tokenizer_loader(path)
+                if sd["tokenizer_json"] is None:
+                    sd["tokenizer_json"] = gguf_gemma4_tokenizer_loader(path)
             else:
                 # See note above for T5.
                 logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
