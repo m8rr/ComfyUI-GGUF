@@ -162,6 +162,8 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
         "arch_str": arch_str,
         "metadata": get_gguf_metadata(reader)
     }
+    if is_text_model:
+        extra["reader"] = reader
     return (state_dict, extra)
 
 # for remapping llama.cpp -> original key names
@@ -405,7 +407,7 @@ def gguf_mmproj_loader(path, dynamic=False):
 
     return vsd
 
-def gguf_tokenizer_loader(path, temb_shape):
+def gguf_tokenizer_loader(path, temb_shape, reader):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
@@ -413,8 +415,6 @@ def gguf_tokenizer_loader(path, temb_shape):
     except ImportError:
         raise ImportError("Please make sure sentencepiece and protobuf are installed.\npip install sentencepiece protobuf")
     spm = model.ModelProto()
-
-    reader = gguf.GGUFReader(path)
 
     if get_field(reader, "tokenizer.ggml.model", str) == "t5":
         if temb_shape == (256384, 4096): # probably UMT5
@@ -453,14 +453,12 @@ def gguf_tokenizer_loader(path, temb_shape):
     del reader
     return torch.frombuffer(bytearray(spm.SerializeToString()), dtype=torch.uint8)
 
-def gguf_tekken_tokenizer_loader(path, temb_shape):
+def gguf_tekken_tokenizer_loader(path, temb_shape, reader):
     # convert ggml (hf) tokenizer metadata to tekken/comfy data
     logging.info("Attempting to recreate tekken tokenizer from GGUF file metadata...")
     import json
     import base64
     from transformers.convert_slow_tokenizer import bytes_to_unicode
-
-    reader = gguf.GGUFReader(path)
 
     model_str = get_field(reader, "tokenizer.ggml.model", str)
     if model_str == "gpt2":
@@ -496,7 +494,7 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
     del reader
     return torch.frombuffer(bytearray(json.dumps(data).encode('utf-8')), dtype=torch.uint8)
 
-def gguf_gemma3_tokenizer_loader(path):
+def gguf_gemma3_tokenizer_loader(path, reader):
     #TODO: merge into gguf_tokenizer_loader
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
@@ -504,7 +502,6 @@ def gguf_gemma3_tokenizer_loader(path):
     except ImportError:
         raise ImportError("Please install sentencepiece and protobuf.\npip install sentencepiece protobuf")
     spm = model.ModelProto()
-    reader = gguf.GGUFReader(path)
 
     spm.normalizer_spec.name = "identity"
     spm.normalizer_spec.add_dummy_prefix = False
@@ -538,12 +535,11 @@ def gguf_gemma3_tokenizer_loader(path):
     del reader
     return torch.frombuffer(bytearray(spm.SerializeToString()), dtype=torch.uint8)
 
-def gguf_gemma4_tokenizer_loader(path):
+def gguf_gemma4_tokenizer_loader(path, reader):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate tokenizer from GGUF file metadata...")
     import json
 
-    reader = gguf.GGUFReader(path)
     tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
     merges = get_list_field(reader, "tokenizer.ggml.merges", str)
     del reader
@@ -657,7 +653,7 @@ def gguf_clip_loader(path, dynamic=False):
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape == (256384, 4096):
             # non-standard Comfy-Org tokenizer
-            sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape)
+            sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape, extra.pop("reader"))
             # TODO: dequantizing token embed here is janky but otherwise we OOM due to tensor being massive.
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
@@ -668,13 +664,11 @@ def gguf_clip_loader(path, dynamic=False):
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
             if arch == "llama" and sd[temb_key].shape == (131072, 5120):
                 # non-standard Comfy-Org tokenizer
-                sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape)
+                sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape, extra.pop("reader"))
             elif arch == "gemma3":
-                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path)
+                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path, extra.pop("reader"))
             if arch == "gemma4":
-                sd["tokenizer_json"] = gguf_json_tokenizer_loader(path)
-                if sd["tokenizer_json"] is None:
-                    sd["tokenizer_json"] = gguf_gemma4_tokenizer_loader(path)
+                sd["tokenizer_json"] = gguf_json_tokenizer_loader(path) or gguf_gemma4_tokenizer_loader(path, extra.pop("reader"))
             else:
                 # See note above for T5.
                 logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
