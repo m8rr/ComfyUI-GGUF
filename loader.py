@@ -237,6 +237,13 @@ CLIP_VISION_SD_MAP = {
 
 CLIP_VISION_QWEN3_MAP = {
     "v.blk": "model.visual.blocks",  
+    ".fc": ".linear_fc",
+    "ck.8.": "st.0.",
+    "ck.16.": "st.1.",
+    "ck.24.": "st.2.",
+    "ck.5.": "st.0.",
+    "ck.11.": "st.1.",
+    "ck.17.": "st.2.",
     "attn_out": "attn.proj",
     "ln1": "norm1",
     "ln2": "norm2",
@@ -248,15 +255,7 @@ CLIP_VISION_QWEN3_MAP = {
     "v.post_ln": "model.visual.merger.norm",
     "v.patch_embd": "model.visual.patch_embed.proj",
     "v.position_embd.weight": "visual.pos_embed.weight",
-    "v.deepstack.8.norm": "model.visual.deepstack_merger_list.0.norm",
-    "v.deepstack.8.fc1": "model.visual.deepstack_merger_list.0.linear_fc1",
-    "v.deepstack.8.fc2": "model.visual.deepstack_merger_list.0.linear_fc2",
-    "v.deepstack.16.norm": "model.visual.deepstack_merger_list.1.norm",
-    "v.deepstack.16.fc1": "model.visual.deepstack_merger_list.1.linear_fc1",
-    "v.deepstack.16.fc2": "model.visual.deepstack_merger_list.1.linear_fc2",
-    "v.deepstack.24.norm": "model.visual.deepstack_merger_list.2.norm",
-    "v.deepstack.24.fc1": "model.visual.deepstack_merger_list.2.linear_fc1",
-    "v.deepstack.24.fc2": "model.visual.deepstack_merger_list.2.linear_fc2",
+    "v.deepstast.": "model.visual.deepstack_merger_list.",
 }
 
 CLIP_VISION_GEMMA4_MAP = {
@@ -375,7 +374,7 @@ def gguf_mmproj_loader(path, dynamic=False):
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
 
     # qwen3vl
-    if "v.deepstack.8.norm.weight" in vsd:
+    if any("deepstack" in key for key in vsd): 
         return sd_map_replace(vsd, CLIP_VISION_QWEN3_MAP)
 
     # qwen2vl
@@ -697,8 +696,9 @@ def gguf_clip_loader(path, dynamic=False):
         if arch == "qwen2vl" or arch == "qwen3vl" or arch == "gemma4":
             vsd = gguf_mmproj_loader(path, dynamic=dynamic)
             if not vsd and arch == "qwen3vl":
-                sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(4608)
-                sd["model.visual.merger.linear_fc2.weight"] = torch.zeros(4096)
+                weight = sd["model.norm.weight"].shape[0]
+                sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(4608 if weight == 4096 else 4096)
+                sd["model.visual.merger.linear_fc2.weight"] = torch.zeros(weight)
             else:
                 sd.update(vsd)
     else:
