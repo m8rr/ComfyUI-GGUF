@@ -5,7 +5,6 @@ import torch
 import gguf
 import re
 import os
-import json
 
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
@@ -452,7 +451,7 @@ def gguf_tokenizer_loader(path, temb_shape):
 
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     del reader
-    return torch.ByteTensor(list(spm.SerializeToString()))
+    return torch.frombuffer(bytearray(spm.SerializeToString()), dtype=torch.uint8)
 
 def gguf_tekken_tokenizer_loader(path, temb_shape):
     # convert ggml (hf) tokenizer metadata to tekken/comfy data
@@ -495,7 +494,7 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
 
     logging.info(f"Created tekken tokenizer with vocab size of {len(data['vocab'])} (+{len(data['special_tokens'])})")
     del reader
-    return torch.ByteTensor(list(json.dumps(data).encode('utf-8')))
+    return torch.frombuffer(bytearray(json.dumps(data).encode('utf-8')), dtype=torch.uint8)
 
 def gguf_gemma3_tokenizer_loader(path):
     #TODO: merge into gguf_tokenizer_loader
@@ -537,11 +536,12 @@ def gguf_gemma3_tokenizer_loader(path):
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     
     del reader
-    return torch.ByteTensor(list(spm.SerializeToString()))
+    return torch.frombuffer(bytearray(spm.SerializeToString()), dtype=torch.uint8)
 
 def gguf_gemma4_tokenizer_loader(path):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate tokenizer from GGUF file metadata...")
+    import json
 
     reader = gguf.GGUFReader(path)
     tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
