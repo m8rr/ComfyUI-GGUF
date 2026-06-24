@@ -5,7 +5,9 @@ import torch
 import gguf
 import re
 import os
+import numpy as np
 
+from gguf import GGUFReader, GGUFValueType
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 from .quant_ops import make_quantized
@@ -13,6 +15,61 @@ from .quant_ops import make_quantized
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image", "ideogram4", "krea2"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
+
+class LazyGGUFReader(GGUFReader):
+    def _get_field_parts(self, orig_offs: int, raw_type: int):
+        gtype = GGUFValueType(raw_type)
+        
+        if gtype == GGUFValueType.ARRAY:
+            raw_itype = self._get(orig_offs, np.uint32)
+            offs = orig_offs + int(raw_itype.nbytes)
+            alen = self._get(offs, np.uint64)
+            array_len = alen[0]
+
+            if array_len > 1000:
+                offs += int(alen.nbytes) 
+                sub_type = raw_itype[0]
+                types = [gtype, GGUFValueType(sub_type)]
+                aparts = [raw_itype, alen]
+                data_idxs = []
+                data_view = self.data
+                is_swapped = (self.byte_order == 'S')
+                
+                if sub_type == 8:
+                    for _ in range(array_len):
+                        slen_arr = data_view[offs : offs + 8]
+                        slen = slen_arr.view(dtype=np.uint64)[0]
+                        if is_swapped:
+                            slen = slen.newbyteorder('S')
+                        
+                        str_total_bytes = 8 + int(slen)
+                        sdata_arr = data_view[offs + 8 : offs + str_total_bytes]
+                        
+                        idxs_offs = len(aparts)
+                        aparts.append(slen_arr)
+                        aparts.append(sdata_arr)
+                        data_idxs.append(idxs_offs + 1)                      
+                        offs += str_total_bytes
+
+                    return offs - orig_offs, aparts, data_idxs, types
+                else:
+                    nptype = self.gguf_scalar_to_np.get(GGUFValueType(sub_type))
+                    if nptype is not None:
+                        item_size = np.dtype(nptype).itemsize
+                        total_bytes = array_len * item_size
+                        total_data = data_view[offs : offs + total_bytes].view(dtype=nptype)
+                        if is_swapped:
+                            total_data = total_data.newbyteorder('S')
+                        
+                        idxs_offs = len(aparts)
+                        aparts.extend(total_data[i : i + 1] for i in range(array_len))
+                        data_idxs = list(range(idxs_offs, idxs_offs + array_len))                      
+                        offs += total_bytes
+
+                        return offs - orig_offs, aparts, data_idxs, types
+
+        return super()._get_field_parts(orig_offs, raw_type)
+
 
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
@@ -72,7 +129,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     """
     Read state dict as fake tensors
     """
-    reader = gguf.GGUFReader(path)
+    reader = LazyGGUFReader(path)
 
     # filter and strip prefix
     has_prefix = False
