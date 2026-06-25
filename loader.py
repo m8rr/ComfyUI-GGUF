@@ -391,7 +391,7 @@ def strip_quant_suffix(name):
 
 def gguf_mmproj_loader(path, dynamic=False):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
-    logging.info("Attenpting to find mmproj file for text encoder...")
+    logging.info("Attempting to find mmproj file for text encoder...")
 
     # get name to match w/o quant suffix
     tenc_fname = os.path.basename(path)
@@ -411,10 +411,10 @@ def gguf_mmproj_loader(path, dynamic=False):
             target.append(fname)
 
     if len(target) == 0:
-        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')!")
+        logging.warning(f"Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}'), vision function will not work!")
         return {}
     if len(target) > 1:
-        logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
+        logging.info(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
 
     logging.info(f"Using mmproj '{target[0]}' for text encoder '{tenc_fname}'.")
     target = os.path.join(root, target[0])
@@ -508,7 +508,9 @@ def gguf_tokenizer_loader(path, temb_shape, reader):
 
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     del reader
-    return torch.frombuffer(bytearray(spm.SerializeToString()), dtype=torch.uint8)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(spm.SerializeToString(), dtype=torch.uint8)
 
 def gguf_tekken_tokenizer_loader(path, temb_shape, reader):
     # convert ggml (hf) tokenizer metadata to tekken/comfy data
@@ -549,7 +551,9 @@ def gguf_tekken_tokenizer_loader(path, temb_shape, reader):
 
     logging.info(f"Created tekken tokenizer with vocab size of {len(data['vocab'])} (+{len(data['special_tokens'])})")
     del reader
-    return torch.frombuffer(bytearray(json.dumps(data).encode('utf-8')), dtype=torch.uint8)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(json.dumps(data).encode('utf-8'), dtype=torch.uint8)
 
 def gguf_gemma3_tokenizer_loader(path, reader):
     #TODO: merge into gguf_tokenizer_loader
@@ -590,7 +594,9 @@ def gguf_gemma3_tokenizer_loader(path, reader):
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     
     del reader
-    return torch.frombuffer(bytearray(spm.SerializeToString()), dtype=torch.uint8)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(spm.SerializeToString(), dtype=torch.uint8)
 
 def gguf_gemma4_tokenizer_loader(path, reader):
     # convert gguf tokenizer to spiece
@@ -672,7 +678,9 @@ def gguf_gemma4_tokenizer_loader(path, reader):
     json_string = json.dumps(tokenizer_dict, ensure_ascii=False)
     
     logging.info(f"Created tokenizer with vocab size of {len(vocab)}")
-    return torch.frombuffer(bytearray(json_string.encode('utf-8')), dtype=torch.uint8)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(json_string.encode('utf-8'), dtype=torch.uint8)
 
 def gguf_json_tokenizer_loader(path):
     tenc_fname = os.path.basename(path)
@@ -701,7 +709,9 @@ def gguf_json_tokenizer_loader(path):
     
     with open(target, "rb") as f:
         tokenizer_bytes = f.read()  
-    return torch.frombuffer(bytearray(tokenizer_bytes), dtype=torch.uint8)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(tokenizer_bytes, dtype=torch.uint8)
 
 def gguf_clip_loader(path, dynamic=False):
     sd, extra = gguf_sd_loader(path, is_text_model=True, dynamic=dynamic)
@@ -725,7 +735,7 @@ def gguf_clip_loader(path, dynamic=False):
             elif arch == "gemma3":
                 sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path, extra.pop("reader"))
             if arch == "gemma4":
-                sd["tokenizer_json"] = gguf_json_tokenizer_loader(path) or gguf_gemma4_tokenizer_loader(path, extra.pop("reader"))
+                sd["tokenizer_json"] = gguf_gemma4_tokenizer_loader(path, extra.pop("reader"))
             else:
                 # See note above for T5.
                 logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
