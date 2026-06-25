@@ -28,9 +28,13 @@ except ImportError:
 
 from .dequant import dequantize_functions, TORCH_COMPATIBLE_QTYPES, is_quantized
 
-HAS_COMPILE = hasattr(torch, 'compile')
 COMPILED_DEQUANT_FUNCTIONS = {}
-
+if hasattr(torch, 'compile'):
+    for k, func in dequantize_functions.items():
+        COMPILED_DEQUANT_FUNCTIONS[k] = torch.compile(func)
+else:
+    COMPILED_DEQUANT_FUNCTIONS = dequantize_functions.copy()
+   
 if _CK_AVAILABLE:
     @dataclass(frozen=True)
     class GGMLLayoutParams(BaseLayoutParams):
@@ -62,8 +66,12 @@ if _CK_AVAILABLE:
             n_blocks = raw.numel() // type_size
             blocks = raw.reshape((n_blocks, type_size))
 
-            fn = get_compiled(qtype, dequantize_functions[qtype])
-            blocks = fn(blocks, block_size, type_size, None)
+            fn = COMPILED_DEQUANT_FUNCTIONS[qtype]
+            try:
+                blocks = fn(blocks, block_size, type_size, None)
+            except Exception:
+                fn = COMPILED_DEQUANT_FUNCTIONS[qtype] = dequantize_functions[qtype]
+                blocks = fn(blocks, block_size, type_size, None)
             return blocks.reshape(oshape).to(params.orig_dtype)
 
         @classmethod
@@ -75,21 +83,6 @@ if _CK_AVAILABLE:
             return {"weight": qdata}
 
     register_layout_class("GGMLLayout", GGMLLayout)
-
-def get_compiled(qtype, raw_func):
-    if qtype in COMPILED_DEQUANT_FUNCTIONS:
-        return COMPILED_DEQUANT_FUNCTIONS[qtype]
-
-    if HAS_COMPILE:
-        try:
-            compiled = torch.compile(raw_func, fullgraph=True)
-        except Exception:
-            compiled = raw_func
-    else:
-        compiled = raw_func
-
-    COMPILED_DEQUANT_FUNCTIONS[qtype] = compiled
-    return compiled
 
 def make_quantized(qdata, tensor_type, tensor_shape, orig_dtype=torch.float16):
     """Construct a GGML QuantizedTensor from raw packed data."""
