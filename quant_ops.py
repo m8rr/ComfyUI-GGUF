@@ -68,10 +68,10 @@ if _CK_AVAILABLE:
 
             fn = COMPILED_DEQUANT_FUNCTIONS[qtype]
             try:
-                blocks = fn(blocks, block_size, type_size, None)
+                blocks = fn(blocks, block_size, type_size, params.orig_dtype)
             except Exception:
                 fn = COMPILED_DEQUANT_FUNCTIONS[qtype] = dequantize_functions[qtype]
-                blocks = fn(blocks, block_size, type_size, None)
+                blocks = fn(blocks, block_size, type_size, params.orig_dtype)
             return blocks.reshape(oshape).to(params.orig_dtype)
 
         @classmethod
