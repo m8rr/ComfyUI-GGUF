@@ -464,7 +464,7 @@ def gguf_mmproj_loader(path, dynamic=False):
 
     return vsd
 
-def gguf_tokenizer_loader(path, temb_shape, reader):
+def gguf_tokenizer_loader(reader, temb_shape):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
@@ -512,7 +512,7 @@ def gguf_tokenizer_loader(path, temb_shape, reader):
         warnings.filterwarnings("ignore", message="The given buffer is not writable")
         return torch.frombuffer(spm.SerializeToString(), dtype=torch.uint8)
 
-def gguf_tekken_tokenizer_loader(path, temb_shape, reader):
+def gguf_tekken_tokenizer_loader(reader, temb_shape):
     # convert ggml (hf) tokenizer metadata to tekken/comfy data
     logging.info("Attempting to recreate tekken tokenizer from GGUF file metadata...")
     import json
@@ -555,7 +555,7 @@ def gguf_tekken_tokenizer_loader(path, temb_shape, reader):
         warnings.filterwarnings("ignore", message="The given buffer is not writable")
         return torch.frombuffer(json.dumps(data).encode('utf-8'), dtype=torch.uint8)
 
-def gguf_gemma3_tokenizer_loader(path, reader):
+def gguf_gemma3_tokenizer_loader(reader):
     #TODO: merge into gguf_tokenizer_loader
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
@@ -598,7 +598,7 @@ def gguf_gemma3_tokenizer_loader(path, reader):
         warnings.filterwarnings("ignore", message="The given buffer is not writable")
         return torch.frombuffer(spm.SerializeToString(), dtype=torch.uint8)
 
-def gguf_gemma4_tokenizer_loader(path, reader):
+def gguf_gemma4_tokenizer_loader(reader):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate tokenizer from GGUF file metadata...")
     import json
@@ -720,7 +720,7 @@ def gguf_clip_loader(path, dynamic=False):
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape == (256384, 4096):
             # non-standard Comfy-Org tokenizer
-            sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape, extra.pop("reader"))
+            sd["spiece_model"] = gguf_tokenizer_loader(extra.pop("reader"), sd[temb_key].shape)
             # TODO: dequantizing token embed here is janky but otherwise we OOM due to tensor being massive.
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
@@ -731,11 +731,11 @@ def gguf_clip_loader(path, dynamic=False):
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
             if arch == "llama" and sd[temb_key].shape == (131072, 5120):
                 # non-standard Comfy-Org tokenizer
-                sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape, extra.pop("reader"))
+                sd["tekken_model"] = gguf_tekken_tokenizer_loader(extra.pop("reader"), sd[temb_key].shape)
             elif arch == "gemma3":
-                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path, extra.pop("reader"))
+                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(extra.pop("reader"))
             if arch == "gemma4":
-                sd["tokenizer_json"] = gguf_gemma4_tokenizer_loader(path, extra.pop("reader"))
+                sd["tokenizer_json"] = gguf_gemma4_tokenizer_loader(extra.pop("reader"))
             else:
                 # See note above for T5.
                 logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
